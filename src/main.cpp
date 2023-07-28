@@ -15,6 +15,15 @@
 #endif
 
 #define ONE_WIRE_BUS 3
+
+const unsigned BATT_LVL_MIN = 325;
+//const unsigned BATT_LVL_OK = 900;
+
+// Schedule TX every this many seconds (might become longer due to duty
+// cycle limitations).
+const unsigned TX_INTERVAL = 900;
+bool transmitting = false;
+
 OneWire oneWire(ONE_WIRE_BUS);
 DS18B20 sensor(&oneWire); 
 
@@ -29,6 +38,7 @@ void do_sendmac(osjob_t* j) {
     byte mydata[1];
     LMIC_setTxData2(0, mydata, sizeof(mydata), 0);
     DEBUGPRINTLN(F("Packet queued (MAC command)"));
+    transmitting = true;
   }
   // Next TX is scheduled after TX_COMPLETE event.
 }
@@ -61,6 +71,49 @@ long readVcc() {
   return result;
 }
 
+void resetLMICDuty(int deepsleep_sec){
+unsigned long now = millis();
+#if defined(CFG_LMIC_EU_like)
+  DEBUGPRINTLN(F("Reset CFG_LMIC_EU_like band avail"));
+  for (int i = 0; i < MAX_BANDS; i++){
+    ostime_t correctedAvail = LMIC.bands[i].avail - ((now / 1000.0 + deepsleep_sec) * OSTICKS_PER_SEC);
+    if (correctedAvail < 0)
+    {
+      correctedAvail = 0;
+    }
+    LMIC.bands[i].avail = correctedAvail;
+    }
+  LMIC.globalDutyAvail = LMIC.globalDutyAvail - ((now / 1000.0 + deepsleep_sec) * OSTICKS_PER_SEC);
+  if (LMIC.globalDutyAvail < 0)
+  {
+    LMIC.globalDutyAvail = 0;
+  }
+  
+#else
+  Serial.println(F("No DutyCycle recalculation function!"));
+#endif
+}
+
+void sleep_long() {
+DEBUGPRINTLN(F("Sleep long"));
+Serial.flush(); // give the serial print chance to complete
+delay(20);
+for (int i=0; i<int(TX_INTERVAL/8); i++) {
+    LowPower.powerDown(SLEEP_8S, ADC_OFF, BOD_OFF);
+    Serial.flush(); // give the serial print chance to complete
+    }
+  DEBUGPRINTLN(F("Sleep long finished"));
+}
+
+void check_battery(int16_t batt_minimum) {
+    while (readVcc() <= batt_minimum){
+        LowPower.powerDown(SLEEP_8S, ADC_OFF, BOD_OFF);
+        resetLMICDuty(8);
+        Serial.flush(); // give the serial print chance to complete   
+    }
+
+}
+
 // Set LoRaWAN keys defined in lorawan-keys.h.
     static const u1_t PROGMEM DEVEUI[8]  = { OTAA_DEVEUI } ;
     static const u1_t PROGMEM APPEUI[8]  = { OTAA_APPEUI };
@@ -73,10 +126,6 @@ long readVcc() {
 
 //static uint8_t mydata[] = "Hello, world!";
 static osjob_t sendjob;
-
-// Schedule TX every this many seconds (might become longer due to duty
-// cycle limitations).
-const unsigned TX_INTERVAL = 900;
 
 // Pin mapping
 const lmic_pinmap lmic_pins = {
@@ -159,8 +208,10 @@ void onEvent (ev_t ev) {
               DEBUGPRINT(LMIC.dataLen);
               DEBUGPRINTLN(F(" bytes of payload"));
             }
+            // ready for next transmission
+            transmitting = false;
             // Schedule next transmission
-            os_setTimedCallback(&sendjob, os_getTime()+sec2osticks(TX_INTERVAL), do_send);
+            //os_setTimedCallback(&sendjob, os_getTime()+sec2osticks(TX_INTERVAL), do_send);
             break;
         case EV_LOST_TSYNC:
             DEBUGPRINTLN(F("EV_LOST_TSYNC"));
@@ -218,6 +269,7 @@ void do_send(osjob_t* j){
         //LMIC_setTxData2(1, mydata, sizeof(mydata)-1, 0);
         // Prepare upstream data transmission at the next possible time.
         LMIC_setTxData2(1, payload, sizeof(payload), 0);
+        transmitting = true;
     }
     // Next TX is scheduled after TX_COMPLETE event.
 }
@@ -259,11 +311,28 @@ void setup() {
         #endif
     #endif
     LMIC.rxDelay = 5;
-
+    // Continue only if the Bbattery is over a safe limit
+    check_battery(BATT_LVL_MIN);
     // Start job (sending automatically starts OTAA too)
     do_send(&sendjob);
 }
 
 void loop() {
     os_runloop_once();
+    if (transmitting == false) {
+    if (LMIC.pendMacLen > 0) {
+      DEBUGPRINTLN(F("Pending MAC message"));
+      do_sendmac(&sendjob);
+    }
+    else {
+      Serial.flush(); // give the serial print chance to complete
+      delay(20);
+      sleep_long();
+      resetLMICDuty(TX_INTERVAL);
+      // Continue only if the Battery is over a safe limit
+      check_battery(BATT_LVL_MIN);
+      do_send(&sendjob);
+    }
+
+}
 }
