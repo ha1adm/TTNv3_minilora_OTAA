@@ -16,7 +16,7 @@
 
 #define ONE_WIRE_BUS 3
 
-const unsigned BATT_LVL_MIN = 325;
+const unsigned BATT_LVL_MIN = 3200;
 //const unsigned BATT_LVL_OK = 900;
 
 // Schedule TX every this many seconds (might become longer due to duty
